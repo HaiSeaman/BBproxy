@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <!-- 背景渐变：从深邃蓝黑到科技极光蓝 -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0F172A" />
+      <stop offset="100%" stop-color="#1E293B" />
+    </linearGradient>
+    
+    <!-- 环形发光渐变 -->
+    <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8" />
+      <stop offset="50%" stop-color="#6366F1" />
+      <stop offset="100%" stop-color="#818CF8" />
+    </linearGradient>
+
+    <!-- 图标主发光滤镜 -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- 圆角外壳外框 -->
+  <rect x="8" y="8" width="112" height="112" rx="28" fill="url(#bgGrad)" stroke="#334155" stroke-width="2" />
+
+  <!-- 内部光效环 (代表流体传输 / Proxy 管道) -->
+  <circle cx="64" cy="64" r="42" fill="none" stroke="url(#ringGrad)" stroke-width="4" stroke-dasharray="180 80" filter="url(#glow)" transform="rotate(-45 64 64)" />
+
+  <!-- BB 抽象化双核网络节点与数据穿梭箭头 -->
+  <!-- 左 B 节点卡片 / 源点 -->
+  <circle cx="46" cy="64" r="8" fill="#38BDF8" />
+  <circle cx="46" cy="64" r="14" fill="none" stroke="#38BDF8" stroke-width="2" stroke-opacity="0.5" />
+
+  <!-- 右 B 节点卡片 / 目标点 -->
+  <circle cx="82" cy="64" r="8" fill="#818CF8" />
+  <circle cx="82" cy="64" r="14" fill="none" stroke="#818CF8" stroke-width="2" stroke-opacity="0.5" />
+
+  <!-- 数据穿梭弧线 -->
+  <path d="M 46 54 A 20 20 0 0 1 82 54" fill="none" stroke="#38BDF8" stroke-width="3" stroke-linecap="round" stroke-dasharray="4 2" />
+  <path d="M 82 74 A 20 20 0 0 1 46 74" fill="none" stroke="#818CF8" stroke-width="3" stroke-linecap="round" stroke-dasharray="4 2" />
+
+  <!-- 中心高亮闪烁点 -->
+  <circle cx="64" cy="64" r="4" fill="#FFFFFF" filter="url(#glow)" />
+</svg>
