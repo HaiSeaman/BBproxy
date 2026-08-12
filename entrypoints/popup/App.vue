@@ -21,6 +21,12 @@
       </div>
     </header>
 
+    <!-- 代理错误警示条（后台 onProxyError 写入 / 保存失败时展示） -->
+    <div v-if="proxyError" class="error-banner">
+      <span class="error-banner-text">⚠ {{ proxyError }}</span>
+      <button class="error-banner-close" @click="dismissProxyError" aria-label="关闭错误提示">×</button>
+    </div>
+
     <!-- 模式切换 Mode Selector Cards -->
     <section class="mode-selector">
       <button
@@ -107,6 +113,7 @@
             v-model="config.server.host"
             class="custom-input"
             placeholder="127.0.0.1"
+            maxlength="255"
             @input="debouncedSave"
           />
         </div>
@@ -126,8 +133,11 @@
       </div>
     </section>
 
-    <!-- 直连白名单 Rules Section (仅在 Auto 模式或点击折叠时显示) -->
-    <section class="rules-section" v-if="config.currentMode === 'auto'">
+    <!-- 直连白名单 Rules Section（Auto 模式走 PAC、Global 模式走 bypassList，均生效） -->
+    <section
+      class="rules-section"
+      v-if="config.currentMode === 'auto' || config.currentMode === 'global'"
+    >
       <div class="section-header">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
@@ -148,6 +158,7 @@
     <footer class="footer">
       <div class="save-status">
         <span v-if="saving" class="saving-text">保存中...</span>
+        <span v-else-if="saveError" class="error-text">✕ 保存失败，请重试</span>
         <span v-else-if="savedToast" class="saved-text">✓ 已自动保存</span>
         <span v-else class="version-text">BBproxy v1.0.0</span>
       </div>
@@ -159,7 +170,7 @@
 import { ref, reactive, onMounted } from 'vue';
 import type { ProxyMode, ProxyScheme, ProxyStorageConfig } from '../../types/proxy';
 import { DEFAULT_PROXY_CONFIG } from '../../types/proxy';
-import { getProxyConfig, saveProxyConfig } from '../../utils/storage';
+import { getProxyConfig, PROXY_ERROR_KEY, saveProxyConfig } from '../../utils/storage';
 
 const config = reactive<ProxyStorageConfig>({
   currentMode: 'direct',
@@ -174,13 +185,23 @@ const config = reactive<ProxyStorageConfig>({
 const rawBypassRules = ref('');
 const saving = ref(false);
 const savedToast = ref(false);
+const saveError = ref(false);
+const proxyError = ref('');
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
+let errorTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * 加载竞态保护：onMounted 的异步读取返回前，若用户已操作（切模式/输入），
+ * 则以用户操作为准，不让加载结果回填覆盖用户刚做的修改。
+ */
+let userInteracted = false;
 
 onMounted(async () => {
   try {
     const saved = await getProxyConfig();
+    if (userInteracted) return;
     config.currentMode = saved.currentMode || DEFAULT_PROXY_CONFIG.currentMode;
     config.server.host = saved.server?.host || DEFAULT_PROXY_CONFIG.server.host;
     config.server.port = saved.server?.port || DEFAULT_PROXY_CONFIG.server.port;
@@ -189,6 +210,17 @@ onMounted(async () => {
     rawBypassRules.value = config.bypassRules.join('\n');
   } catch (err) {
     console.error('[BBproxy] 读取配置失败，使用默认配置:', err);
+  }
+
+  // 读取后台写入的代理错误（如代理服务器不可达），展示给用户
+  try {
+    const result = await chrome.storage.local.get(PROXY_ERROR_KEY);
+    const info = result[PROXY_ERROR_KEY];
+    if (info && typeof info.error === 'string') {
+      proxyError.value = info.error;
+    }
+  } catch (err) {
+    console.error('[BBproxy] 读取代理错误信息失败:', err);
   }
 });
 
@@ -204,11 +236,11 @@ function modeLabel(mode: ProxyMode): string {
 }
 
 async function switchMode(mode: ProxyMode) {
-  // 先取消排队的防抖保存，避免旧输入触发重复保存覆盖新模式
-  if (saveTimer) {
-    clearTimeout(saveTimer);
-    saveTimer = null;
-  }
+  // 模式切换必须同步保存：popup 关闭即销毁 JS 上下文，pending setTimeout 不会执行，
+  // 延迟保存会导致“UI 显示新模式但 storage/代理未更新”。
+  // 不取消排队的输入防抖：saveConfig 保存的是完整快照（含当前 mode），
+  // 稍后触发的保存内容一致，不会覆盖新模式。
+  userInteracted = true;
   config.currentMode = mode;
   await saveConfig();
 }
@@ -222,10 +254,22 @@ async function saveConfig() {
 
   saving.value = true;
   try {
-    // 深拷贝后再写入，避免 Vue reactive Proxy 参与序列化
-    await saveProxyConfig(JSON.parse(JSON.stringify(config)));
+    // 展开为普通对象后再写入，避免 Vue reactive Proxy 参与序列化
+    await saveProxyConfig({
+      currentMode: config.currentMode,
+      server: { ...config.server },
+      bypassRules: [...config.bypassRules],
+    });
+    saveError.value = false;
   } catch (err) {
     console.error('[BBproxy] 配置保存失败:', err);
+    saveError.value = true;
+    // 失败提示停留 3s 后自动消失，避免永久霸占 footer
+    if (errorTimer) clearTimeout(errorTimer);
+    errorTimer = setTimeout(() => {
+      saveError.value = false;
+    }, 3000);
+    return;
   } finally {
     saving.value = false;
   }
@@ -233,6 +277,7 @@ async function saveConfig() {
 }
 
 function debouncedSave() {
+  userInteracted = true;
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     saveConfig();
@@ -240,14 +285,15 @@ function debouncedSave() {
 }
 
 function debouncedSaveRules() {
-  const parsed = rawBypassRules.value
-    .split('\n')
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  config.bypassRules = Array.from(new Set(parsed));
-
+  userInteracted = true;
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
+    // 规则解析移入防抖回调，避免每次击键都重复 split/map/filter/Set
+    const parsed = rawBypassRules.value
+      .split('\n')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    config.bypassRules = Array.from(new Set(parsed));
     saveConfig();
   }, 600);
 }
@@ -258,6 +304,16 @@ function showToast() {
   toastTimer = setTimeout(() => {
     savedToast.value = false;
   }, 1500);
+}
+
+/** 关闭代理错误警示条并清除 storage 中的错误记录 */
+async function dismissProxyError() {
+  proxyError.value = '';
+  try {
+    await chrome.storage.local.remove(PROXY_ERROR_KEY);
+  } catch (err) {
+    console.error('[BBproxy] 清除代理错误信息失败:', err);
+  }
 }
 </script>
 
@@ -280,6 +336,42 @@ function showToast() {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 16px;
+}
+
+/* 代理错误警示条 */
+.error-banner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -6px 0 12px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #FEF2F2;
+  border: 1px solid #FECACA;
+  color: #B91C1C;
+  font-size: 11px;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.error-banner-text {
+  flex: 1;
+}
+
+.error-banner-close {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: #B91C1C;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.error-banner-close:hover {
+  color: #7F1D1D;
 }
 
 .brand {
@@ -547,6 +639,10 @@ function showToast() {
 }
 .saved-text {
   color: #059669;
+  font-weight: 600;
+}
+.error-text {
+  color: #DC2626;
   font-weight: 600;
 }
 .version-text {

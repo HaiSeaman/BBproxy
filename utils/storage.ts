@@ -1,7 +1,15 @@
 import type { ProxyMode, ProxyScheme, ProxyStorageConfig } from '../types/proxy';
-import { DEFAULT_PROXY_CONFIG } from '../types/proxy';
+import {
+  DEFAULT_PROXY_CONFIG,
+  MAX_BYPASS_RULES,
+  MAX_HOST_LENGTH,
+  MAX_RULE_LENGTH,
+} from '../types/proxy';
 
 const STORAGE_KEY = 'proxyConfig';
+
+/** 代理错误信息存储键：background 写入，popup 读取展示 */
+export const PROXY_ERROR_KEY = 'proxyError';
 
 const VALID_SCHEMES: ProxyScheme[] = ['http', 'https', 'socks5'];
 
@@ -23,14 +31,18 @@ export function sanitizeProxyConfig(raw: unknown): ProxyStorageConfig {
   const r = raw as Partial<ProxyStorageConfig> & Record<string, any>;
 
   // 兼容旧版 rules 字段；过滤非 ASCII（PAC/bypassList 只接受 ASCII，中文域名需
-  // Punycode 编码，此处直接丢弃非 ASCII 规则）
+  // Punycode 编码，此处直接丢弃非 ASCII 规则），并限制单条长度与总条数
   let bypassRules = r.bypassRules;
   if (!Array.isArray(bypassRules)) {
     bypassRules = Array.isArray(r.rules) ? r.rules : [...DEFAULT_PROXY_CONFIG.bypassRules];
   }
   bypassRules = bypassRules
     .map((rule: unknown) => String(rule).trim())
-    .filter((rule: string) => rule.length > 0 && /^[\x00-\x7F]*$/.test(rule));
+    .filter(
+      (rule: string) =>
+        rule.length > 0 && rule.length <= MAX_RULE_LENGTH && /^[\x00-\x7F]*$/.test(rule)
+    )
+    .slice(0, MAX_BYPASS_RULES);
 
   const rawMode = r.currentMode as ProxyMode | undefined;
   const rawScheme = String(r.server?.scheme ?? '').toLowerCase();
@@ -40,7 +52,7 @@ export function sanitizeProxyConfig(raw: unknown): ProxyStorageConfig {
   return {
     currentMode: rawMode === 'direct' || rawMode === 'global' || rawMode === 'auto' ? rawMode : DEFAULT_PROXY_CONFIG.currentMode,
     server: {
-      host: rawHost || DEFAULT_PROXY_CONFIG.server.host,
+      host: rawHost && rawHost.length <= MAX_HOST_LENGTH ? rawHost : DEFAULT_PROXY_CONFIG.server.host,
       port: Number.isInteger(rawPort) && rawPort >= 1 && rawPort <= 65535 ? rawPort : DEFAULT_PROXY_CONFIG.server.port,
       scheme: VALID_SCHEMES.includes(rawScheme as ProxyScheme)
         ? (rawScheme as ProxyScheme)

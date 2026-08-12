@@ -23,3 +23,12 @@ export const DEFAULT_PROXY_CONFIG: ProxyStorageConfig = {
   },
   bypassRules: ['localhost', '127.0.0.1', '192.168.*'],
 };
+
+/** 代理服务器 host 最大长度（RFC 1035 域名上限 253，IPv6 带方括号放宽到 255） */
+export const MAX_HOST_LENGTH = 255;
+
+/** 单条白名单规则最大长度 */
+export const MAX_RULE_LENGTH = 255;
+
+/** 白名单规则最大条数（超出截断，防止 PAC 脚本无界膨胀） */
+export const MAX_BYPASS_RULES = 200;

@@ -16,6 +16,9 @@ web_modules/
 .output/
 .wxt/
 
+# Local tooling metadata (desktop session titles etc.)
+.reasonix/
+
 # IDE & Editor files
 .vscode/*
 !.vscode/extensions.json

@@ -1,2 +1,0 @@
-[permissions]
-allow = ["Bash=cd /d/AI/Github/BBproxy/BBproxy && file .reasonix/attachments/clipboard-20260810-025743.988426-000001.png 2>/dev/null; python -c \"print('python ok')\""]

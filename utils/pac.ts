@@ -1,4 +1,5 @@
 import type { ProxyServerConfig } from '../types/proxy';
+import { MAX_BYPASS_RULES, MAX_HOST_LENGTH, MAX_RULE_LENGTH } from '../types/proxy';
 
 /**
  * PAC 代理类型映射。
@@ -22,12 +23,17 @@ const HOST_SAFE_PATTERN = /^[a-zA-Z0-9.\-_:[\]]+$/;
 const HOST_STRIP_PATTERN = /["\\\r\n;]/g;
 
 /**
- * 清洗代理服务器 host，防止特殊字符注入 PAC 脚本
+ * 清洗代理服务器 host，防止特殊字符注入 PAC 脚本。
+ * 返回规范化后的主机名：含 ':' 的 IPv6 地址自动加方括号（PAC 与
+ * chrome.proxy fixed_servers 均要求 [IPv6] 形式，裸 ::1 会导致解析失败）。
  */
-function sanitizeHost(host: string | undefined): string {
+export function sanitizeHost(host: string | undefined): string {
   let safe = (host || '').trim().replace(HOST_STRIP_PATTERN, '');
-  if (!HOST_SAFE_PATTERN.test(safe)) {
+  if (!HOST_SAFE_PATTERN.test(safe) || safe.length > MAX_HOST_LENGTH) {
     safe = '127.0.0.1';
+  }
+  if (safe.includes(':') && !safe.startsWith('[')) {
+    safe = `[${safe}]`;
   }
   return safe;
 }
@@ -56,39 +62,53 @@ export function generatePacScript(server: ProxyServerConfig, bypassRules: string
   // 过滤并清理规则（JSON.stringify 会正确转义引号/反斜杠，注入安全）。
   // 注意：PAC 脚本只允许 ASCII，包含非 ASCII 字符（如中文域名）的规则会导致
   // Chrome 拒绝整个 PAC（'pacScript.data' supports only ASCII code），故直接丢弃。
+  // 同时限制单条长度与总条数，防止 PAC 脚本无界膨胀。
   const cleanBypassRules = (bypassRules || [])
     .map((r) => r.trim())
-    .filter((r) => r.length > 0 && /^[\x00-\x7F]*$/.test(r));
+    .filter((r) => r.length > 0 && r.length <= MAX_RULE_LENGTH && /^[\x00-\x7F]*$/.test(r))
+    .slice(0, MAX_BYPASS_RULES);
 
-  const bypassRulesJson = JSON.stringify(cleanBypassRules);
+  // 预分类规则，避免 FindProxyForURL 每请求对每条规则重复做正则替换 / 字符串拼接。
+  // PAC 是浏览器网络栈热路径，对每个网络请求都会执行，规则越多收益越大：
+  // - plainRules：不含通配符的规则（精确域名/IP + 子域匹配），运行时只需一次 dnsDomainIs
+  // - wildRules：含通配符（* 或 ?）的规则（192.168.* / 10.0.0.? 等），运行时只需一次
+  //   shExpMatch；原逻辑会对通配规则额外尝试 "*.rule"（匹配子域），此处生成时预拼接好该变体
+  const plainRules: string[] = [];
+  const wildRules: string[] = [];
+  for (const rawRule of cleanBypassRules) {
+    // strip leading dot, e.g. .google.com -> google.com
+    const rule = rawRule.replace(/^\./, '');
+    if (rule.includes('*') || rule.includes('?')) {
+      wildRules.push(rule);
+      // 原逻辑会对通配规则额外尝试 "*." + cleanRule（匹配其子域），生成时预拼接好该变体
+      wildRules.push('*.' + rule);
+    } else {
+      plainRules.push(rule);
+    }
+  }
+
+  const plainRulesJson = JSON.stringify(plainRules);
+  const wildRulesJson = JSON.stringify(wildRules);
 
   // 注意：PAC 脚本内容必须保持纯 ASCII（Chrome 限制 pacScript.data 只接受 ASCII），
   // 因此本模板内不得出现任何非 ASCII 字符（含中文注释）。
+  // safeHost 已由 sanitizeHost 规范化（IPv6 自动加方括号），此处直接拼接
   return `
+var proxyStr = "${pacProxyType} ${safeHost}:${safePort}";
+var plainRules = ${plainRulesJson};
+var wildRules = ${wildRulesJson};
+
 function FindProxyForURL(url, host) {
-  var bypassRules = ${bypassRulesJson};
-  var proxyStr = "${pacProxyType} ${safeHost}:${safePort}";
-
-  // loop over bypass rules
-  for (var i = 0; i < bypassRules.length; i++) {
-    var rule = bypassRules[i];
-    if (!rule) continue;
-
-    // strip leading dot, e.g. .google.com -> google.com
-    var cleanRule = rule.replace(/^\\./, '');
-
-    // 1. exact match
-    if (host === rule || host === cleanRule) {
+  // 1. exact / domain / subdomain match (dnsDomainIs covers host === rule)
+  for (var i = 0; i < plainRules.length; i++) {
+    if (dnsDomainIs(host, plainRules[i])) {
       return "DIRECT";
     }
+  }
 
-    // 2. wildcard match (e.g. 192.168.* / *.local / 10.*.*.*)
-    if (shExpMatch(host, rule) || shExpMatch(host, cleanRule)) {
-      return "DIRECT";
-    }
-
-    // 3. domain and subdomain match
-    if (dnsDomainIs(host, cleanRule) || shExpMatch(host, "*." + cleanRule)) {
+  // 2. wildcard match (e.g. 192.168.* / *.local / 10.*.*.*)
+  for (var i = 0; i < wildRules.length; i++) {
+    if (shExpMatch(host, wildRules[i])) {
       return "DIRECT";
     }
   }
