@@ -3,7 +3,7 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   // ignores 必须是独立的全局配置块
-  { ignores: ['node_modules', '.output', '.wxt', '.reasonix', 'tmp'] },
+  { ignores: ['node_modules', '.output', '.wxt', 'tmp'] },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {

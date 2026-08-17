@@ -160,7 +160,7 @@
         <span v-if="saving" class="saving-text">保存中...</span>
         <span v-else-if="saveError" class="error-text">✕ 保存失败，请重试</span>
         <span v-else-if="savedToast" class="saved-text">✓ 已自动保存</span>
-        <span v-else class="version-text">BBproxy v1.0.0</span>
+        <span v-else class="version-text">BBproxy v{{ version }}</span>
       </div>
     </footer>
   </div>
@@ -168,18 +168,18 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue';
-import type { ProxyMode, ProxyScheme, ProxyStorageConfig } from '../../types/proxy';
+import type { ProxyMode, ProxyStorageConfig } from '../../types/proxy';
 import { DEFAULT_PROXY_CONFIG } from '../../types/proxy';
+import { sanitizePort } from '../../utils/pac';
 import { getProxyConfig, PROXY_ERROR_KEY, saveProxyConfig } from '../../utils/storage';
 
+/** 版本号读取自 manifest（WXT 自动同步 package.json 的 version），避免多处硬编码 */
+const version = chrome.runtime.getManifest().version;
+
 const config = reactive<ProxyStorageConfig>({
-  currentMode: 'direct',
-  server: {
-    host: '127.0.0.1',
-    port: 10808,
-    scheme: 'socks5',
-  },
-  bypassRules: [],
+  ...DEFAULT_PROXY_CONFIG,
+  server: { ...DEFAULT_PROXY_CONFIG.server },
+  bypassRules: [...DEFAULT_PROXY_CONFIG.bypassRules],
 });
 
 const rawBypassRules = ref('');
@@ -192,6 +192,15 @@ let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let errorTimer: ReturnType<typeof setTimeout> | null = null;
 
+// 同步后台写入/清除的代理错误：popup 打开期间 onProxyError 会写入新错误、
+// 应用成功后 background 会清除错误，仅在 onMounted 读一次会展示陈旧快照。
+// 监听器先于挂载时的异步读取注册；storage.get 总返回最新状态，两者不会互相覆盖。
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local' || !changes[PROXY_ERROR_KEY]) return;
+  const info = changes[PROXY_ERROR_KEY].newValue;
+  proxyError.value = info && typeof info.error === 'string' ? info.error : '';
+});
+
 /**
  * 加载竞态保护：onMounted 的异步读取返回前，若用户已操作（切模式/输入），
  * 则以用户操作为准，不让加载结果回填覆盖用户刚做的修改。
@@ -202,11 +211,8 @@ onMounted(async () => {
   try {
     const saved = await getProxyConfig();
     if (userInteracted) return;
-    config.currentMode = saved.currentMode || DEFAULT_PROXY_CONFIG.currentMode;
-    config.server.host = saved.server?.host || DEFAULT_PROXY_CONFIG.server.host;
-    config.server.port = saved.server?.port || DEFAULT_PROXY_CONFIG.server.port;
-    config.server.scheme = (saved.server?.scheme as ProxyScheme) || DEFAULT_PROXY_CONFIG.server.scheme;
-    config.bypassRules = Array.isArray(saved.bypassRules) ? saved.bypassRules : [...DEFAULT_PROXY_CONFIG.bypassRules];
+    // getProxyConfig 已返回结构完整、值合法的配置（sanitizeProxyConfig 保证），整体回填即可
+    Object.assign(config, saved);
     rawBypassRules.value = config.bypassRules.join('\n');
   } catch (err) {
     console.error('[BBproxy] 读取配置失败，使用默认配置:', err);
@@ -247,10 +253,7 @@ async function switchMode(mode: ProxyMode) {
 
 async function saveConfig() {
   // 端口前端规整：非法输入立即回退默认值，避免依赖后台静默修正
-  const port = Number(config.server.port);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    config.server.port = DEFAULT_PROXY_CONFIG.server.port;
-  }
+  config.server.port = sanitizePort(config.server.port);
 
   saving.value = true;
   try {

@@ -1,6 +1,6 @@
 {
   "name": "bbproxy",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "BBproxy - 基于 WXT + Vue3 + TS 的极简代理切换插件",
   "type": "module",
   "scripts": {

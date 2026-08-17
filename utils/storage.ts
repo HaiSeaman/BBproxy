@@ -1,12 +1,9 @@
 import type { ProxyMode, ProxyScheme, ProxyStorageConfig } from '../types/proxy';
-import {
-  DEFAULT_PROXY_CONFIG,
-  MAX_BYPASS_RULES,
-  MAX_HOST_LENGTH,
-  MAX_RULE_LENGTH,
-} from '../types/proxy';
+import { DEFAULT_PROXY_CONFIG, MAX_HOST_LENGTH } from '../types/proxy';
+import { sanitizeBypassRules, sanitizePort } from './pac';
 
-const STORAGE_KEY = 'proxyConfig';
+/** 代理配置存储键：popup 写入、background 读取并按它过滤 onChanged 事件 */
+export const STORAGE_KEY = 'proxyConfig';
 
 /** 代理错误信息存储键：background 写入，popup 读取展示 */
 export const PROXY_ERROR_KEY = 'proxyError';
@@ -30,30 +27,20 @@ export function sanitizeProxyConfig(raw: unknown): ProxyStorageConfig {
 
   const r = raw as Partial<ProxyStorageConfig> & Record<string, any>;
 
-  // 兼容旧版 rules 字段；过滤非 ASCII（PAC/bypassList 只接受 ASCII，中文域名需
-  // Punycode 编码，此处直接丢弃非 ASCII 规则），并限制单条长度与总条数
-  let bypassRules = r.bypassRules;
-  if (!Array.isArray(bypassRules)) {
-    bypassRules = Array.isArray(r.rules) ? r.rules : [...DEFAULT_PROXY_CONFIG.bypassRules];
-  }
-  bypassRules = bypassRules
-    .map((rule: unknown) => String(rule).trim())
-    .filter(
-      (rule: string) =>
-        rule.length > 0 && rule.length <= MAX_RULE_LENGTH && /^[\x00-\x7F]*$/.test(rule)
-    )
-    .slice(0, MAX_BYPASS_RULES);
+  // 规则清洗（trim/非 ASCII/限长/限条数）统一走 sanitizeBypassRules，与 PAC 生成共用
+  const bypassRules = Array.isArray(r.bypassRules)
+    ? sanitizeBypassRules(r.bypassRules)
+    : [...DEFAULT_PROXY_CONFIG.bypassRules];
 
   const rawMode = r.currentMode as ProxyMode | undefined;
   const rawScheme = String(r.server?.scheme ?? '').toLowerCase();
-  const rawPort = Number(r.server?.port);
   const rawHost = typeof r.server?.host === 'string' ? r.server.host.trim() : '';
 
   return {
     currentMode: rawMode === 'direct' || rawMode === 'global' || rawMode === 'auto' ? rawMode : DEFAULT_PROXY_CONFIG.currentMode,
     server: {
       host: rawHost && rawHost.length <= MAX_HOST_LENGTH ? rawHost : DEFAULT_PROXY_CONFIG.server.host,
-      port: Number.isInteger(rawPort) && rawPort >= 1 && rawPort <= 65535 ? rawPort : DEFAULT_PROXY_CONFIG.server.port,
+      port: sanitizePort(r.server?.port),
       scheme: VALID_SCHEMES.includes(rawScheme as ProxyScheme)
         ? (rawScheme as ProxyScheme)
         : DEFAULT_PROXY_CONFIG.server.scheme,
@@ -63,16 +50,11 @@ export function sanitizeProxyConfig(raw: unknown): ProxyStorageConfig {
 }
 
 /**
- * 获取当前的代理配置（如未设置则初始化并返回默认值）
+ * 获取当前的代理配置（缺省/脏数据统一经 sanitize 返回合法配置）。
+ * 不做"首次写入默认值"：读取方行为一致，还省掉一次触发 onChanged 的冗余写。
  */
 export async function getProxyConfig(): Promise<ProxyStorageConfig> {
   const result = await chrome.storage.local.get(STORAGE_KEY);
-  if (!result[STORAGE_KEY]) {
-    // 经 sanitize 深拷贝后再写入，避免默认配置对象被直接存入 storage 后遭外部修改
-    const initial = sanitizeProxyConfig(DEFAULT_PROXY_CONFIG);
-    await saveProxyConfig(initial);
-    return initial;
-  }
   return sanitizeProxyConfig(result[STORAGE_KEY]);
 }
 

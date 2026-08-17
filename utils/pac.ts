@@ -2,17 +2,14 @@ import type { ProxyServerConfig } from '../types/proxy';
 import { MAX_BYPASS_RULES, MAX_HOST_LENGTH, MAX_RULE_LENGTH } from '../types/proxy';
 
 /**
- * PAC 代理类型映射。
- * Chrome PAC 脚本仅支持 DIRECT / PROXY / SOCKS / SOCKS4 / SOCKS5：
+ * PAC 代理类型映射（sanitizeProxyConfig 仅放行 http/https/socks5）。
  * - http  → PROXY
  * - https → PROXY（HTTPS 代理实际通过 CONNECT 隧道，PAC 中必须写作 PROXY，否则 Chrome 拒绝该 PAC）
- * - socks4 → SOCKS4
  * - socks5 → SOCKS5
  */
 const PAC_SCHEME_MAP: Record<string, string> = {
   http: 'PROXY',
   https: 'PROXY',
-  socks4: 'SOCKS4',
   socks5: 'SOCKS5',
 };
 
@@ -39,11 +36,23 @@ export function sanitizeHost(host: string | undefined): string {
 }
 
 /**
- * 校验并规整端口，仅接受 1-65535 的整数
+ * 校验并规整端口，仅接受 1-65535 的整数（非法回退 10808）
  */
-function sanitizePort(port: number | string | undefined): number {
+export function sanitizePort(port: number | string | undefined): number {
   const num = Number(port);
   return Number.isInteger(num) && num >= 1 && num <= 65535 ? num : 10808;
+}
+
+/**
+ * 清洗白名单规则：trim、丢弃空/非 ASCII/超长规则并限制总条数。
+ * PAC 脚本与 fixed_servers bypassList 均只接受 ASCII（非 ASCII 会被 Chrome
+ * 拒绝整个配置），storage 入口与 PAC 生成共用本函数，保证两处行为一致。
+ */
+export function sanitizeBypassRules(rules: unknown[]): string[] {
+  return rules
+    .map((rule) => String(rule).trim())
+    .filter((rule) => rule.length > 0 && rule.length <= MAX_RULE_LENGTH && /^[\x00-\x7F]*$/.test(rule))
+    .slice(0, MAX_BYPASS_RULES);
 }
 
 /**
@@ -53,20 +62,13 @@ function sanitizePort(port: number | string | undefined): number {
  * @returns 符合 PAC 规范的 JS 字符串
  */
 export function generatePacScript(server: ProxyServerConfig, bypassRules: string[]): string {
-  const scheme = (server.scheme || 'socks5').toLowerCase();
-  const pacProxyType = PAC_SCHEME_MAP[scheme] || 'PROXY';
+  const pacProxyType = PAC_SCHEME_MAP[server.scheme] || 'PROXY';
 
   const safeHost = sanitizeHost(server.host);
   const safePort = sanitizePort(server.port);
 
-  // 过滤并清理规则（JSON.stringify 会正确转义引号/反斜杠，注入安全）。
-  // 注意：PAC 脚本只允许 ASCII，包含非 ASCII 字符（如中文域名）的规则会导致
-  // Chrome 拒绝整个 PAC（'pacScript.data' supports only ASCII code），故直接丢弃。
-  // 同时限制单条长度与总条数，防止 PAC 脚本无界膨胀。
-  const cleanBypassRules = (bypassRules || [])
-    .map((r) => r.trim())
-    .filter((r) => r.length > 0 && r.length <= MAX_RULE_LENGTH && /^[\x00-\x7F]*$/.test(r))
-    .slice(0, MAX_BYPASS_RULES);
+  // 规则清洗见 sanitizeBypassRules；JSON.stringify 会正确转义引号/反斜杠，注入安全
+  const cleanBypassRules = sanitizeBypassRules(bypassRules);
 
   // 预分类规则，避免 FindProxyForURL 每请求对每条规则重复做正则替换 / 字符串拼接。
   // PAC 是浏览器网络栈热路径，对每个网络请求都会执行，规则越多收益越大：

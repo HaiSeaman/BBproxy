@@ -72,11 +72,6 @@ describe('sanitizeProxyConfig', () => {
     expect(cfg.bypassRules.length).toBe(MAX_BYPASS_RULES);
   });
 
-  it('兼容旧版 rules 字段', () => {
-    const cfg = sanitizeProxyConfig({ rules: ['a.com', 'b.com'] });
-    expect(cfg.bypassRules).toEqual(['a.com', 'b.com']);
-  });
-
   it('server 缺失时使用默认 server', () => {
     const cfg = sanitizeProxyConfig({ currentMode: 'auto' });
     expect(cfg.server).toEqual(DEFAULT_PROXY_CONFIG.server);
