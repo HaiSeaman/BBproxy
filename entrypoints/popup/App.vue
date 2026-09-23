@@ -144,21 +144,32 @@
         </svg>
         <span>直连白名单规则 (DIRECT)</span>
       </div>
-      <p class="section-tip">匹配列表的 IP/网段直接直连，其余流量走代理：</p>
+      <p class="section-tip">匹配列表的 IP/网段直接直连，其余流量走代理（域名规则同时覆盖其子域）：</p>
       <textarea
         v-model="rawBypassRules"
         class="custom-textarea"
         rows="4"
         placeholder="每行一个 IP、局域网段或域名规则，例如：&#10;127.0.0.1&#10;192.168.*&#10;localhost"
-        @input="debouncedSaveRules"
+        @input="debouncedSave"
       ></textarea>
     </section>
+
+    <!-- 故障转移开关：仅 Auto(PAC) 模式生效，Global 模式的 fixed_servers 无兜底链概念 -->
+    <label v-if="config.currentMode === 'auto'" class="fallback-row">
+      <input
+        type="checkbox"
+        class="fallback-checkbox"
+        v-model="config.fallbackDirect"
+        @change="saveConfig"
+      />
+      <span>代理不可达时退回直连（避免整机断网，但故障期间流量会绕过代理）</span>
+    </label>
 
     <!-- 底部状态 Footer -->
     <footer class="footer">
       <div class="save-status">
         <span v-if="saving" class="saving-text">保存中...</span>
-        <span v-else-if="saveError" class="error-text">✕ 保存失败，请重试</span>
+        <span v-else-if="saveError" class="error-text">✕ {{ saveError }}</span>
         <span v-else-if="savedToast" class="saved-text">✓ 已自动保存</span>
         <span v-else class="version-text">BBproxy v{{ version }}</span>
       </div>
@@ -167,67 +178,45 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue';
+import { ref, reactive } from 'vue';
 import type { ProxyMode, ProxyStorageConfig } from '../../types/proxy';
-import { DEFAULT_PROXY_CONFIG } from '../../types/proxy';
-import { sanitizePort } from '../../utils/pac';
-import { getProxyConfig, PROXY_ERROR_KEY, saveProxyConfig } from '../../utils/storage';
+import { isUsableProxyHost, parseRulesText, sanitizePort } from '../../utils/pac';
+import { PROXY_ERROR_KEY, saveProxyConfig, toPlainConfig } from '../../utils/storage';
+
+/**
+ * 配置与代理错误由 main.ts 在读完之后以 props 传入。
+ * 面板不在挂载后再去读 storage：那样面板会先用默认值渲染、异步回填再覆盖，
+ * 用户在这段空窗里操作控件就会把默认值当成真实配置写回 storage，
+ * 直接覆盖掉用户自己的主机/端口/白名单（数据丢失级竞态）。
+ */
+const props = defineProps<{
+  initialConfig: ProxyStorageConfig;
+  initialError: string;
+}>();
 
 /** 版本号读取自 manifest（WXT 自动同步 package.json 的 version），避免多处硬编码 */
 const version = chrome.runtime.getManifest().version;
 
-const config = reactive<ProxyStorageConfig>({
-  ...DEFAULT_PROXY_CONFIG,
-  server: { ...DEFAULT_PROXY_CONFIG.server },
-  bypassRules: [...DEFAULT_PROXY_CONFIG.bypassRules],
-});
+/** 用普通对象副本初始化，避免把 props 里的对象（或模块级默认值）改成响应式后互相污染 */
+const config = reactive<ProxyStorageConfig>(toPlainConfig(props.initialConfig));
 
-const rawBypassRules = ref('');
+const rawBypassRules = ref(config.bypassRules.join('\n'));
 const saving = ref(false);
 const savedToast = ref(false);
-const saveError = ref(false);
-const proxyError = ref('');
+/** 空串表示无错误；非空即错误文案 */
+const saveError = ref('');
+const proxyError = ref(props.initialError);
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let errorTimer: ReturnType<typeof setTimeout> | null = null;
 
 // 同步后台写入/清除的代理错误：popup 打开期间 onProxyError 会写入新错误、
-// 应用成功后 background 会清除错误，仅在 onMounted 读一次会展示陈旧快照。
-// 监听器先于挂载时的异步读取注册；storage.get 总返回最新状态，两者不会互相覆盖。
+// 应用成功后 background 会清除错误，仅在挂载时读一次会展示陈旧快照。
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local' || !changes[PROXY_ERROR_KEY]) return;
   const info = changes[PROXY_ERROR_KEY].newValue;
   proxyError.value = info && typeof info.error === 'string' ? info.error : '';
-});
-
-/**
- * 加载竞态保护：onMounted 的异步读取返回前，若用户已操作（切模式/输入），
- * 则以用户操作为准，不让加载结果回填覆盖用户刚做的修改。
- */
-let userInteracted = false;
-
-onMounted(async () => {
-  try {
-    const saved = await getProxyConfig();
-    if (userInteracted) return;
-    // getProxyConfig 已返回结构完整、值合法的配置（sanitizeProxyConfig 保证），整体回填即可
-    Object.assign(config, saved);
-    rawBypassRules.value = config.bypassRules.join('\n');
-  } catch (err) {
-    console.error('[BBproxy] 读取配置失败，使用默认配置:', err);
-  }
-
-  // 读取后台写入的代理错误（如代理服务器不可达），展示给用户
-  try {
-    const result = await chrome.storage.local.get(PROXY_ERROR_KEY);
-    const info = result[PROXY_ERROR_KEY];
-    if (info && typeof info.error === 'string') {
-      proxyError.value = info.error;
-    }
-  } catch (err) {
-    console.error('[BBproxy] 读取代理错误信息失败:', err);
-  }
 });
 
 function modeLabel(mode: ProxyMode): string {
@@ -244,34 +233,34 @@ function modeLabel(mode: ProxyMode): string {
 async function switchMode(mode: ProxyMode) {
   // 模式切换必须同步保存：popup 关闭即销毁 JS 上下文，pending setTimeout 不会执行，
   // 延迟保存会导致“UI 显示新模式但 storage/代理未更新”。
-  // 不取消排队的输入防抖：saveConfig 保存的是完整快照（含当前 mode），
-  // 稍后触发的保存内容一致，不会覆盖新模式。
-  userInteracted = true;
   config.currentMode = mode;
   await saveConfig();
 }
 
+/**
+ * 唯一写入路径：任何触发点（输入防抖、切模式、协议下拉、故障转移复选框）都走这里。
+ * 因此它必须先做两件前置动作，保证无论谁触发、无论先后顺序都不会漏数据：
+ * 1. 把文本域的规则解析回 config —— 否则某个更早的防抖定时器被取消时，
+ *    用户刚敲进去的整批白名单规则会静默丢失；
+ * 2. 规整端口、校验主机 —— 否则后台会把非法主机静默清洗成 127.0.0.1，
+ *    造成“面板显示一个主机、实际代理指向另一个主机”且毫无提示。
+ */
 async function saveConfig() {
-  // 端口前端规整：非法输入立即回退默认值，避免依赖后台静默修正
+  config.bypassRules = parseRulesText(rawBypassRules.value);
   config.server.port = sanitizePort(config.server.port);
+
+  if (!isUsableProxyHost(config.server.host)) {
+    showError('服务器地址不合法，未保存');
+    return;
+  }
 
   saving.value = true;
   try {
-    // 展开为普通对象后再写入，避免 Vue reactive Proxy 参与序列化
-    await saveProxyConfig({
-      currentMode: config.currentMode,
-      server: { ...config.server },
-      bypassRules: [...config.bypassRules],
-    });
-    saveError.value = false;
+    await saveProxyConfig(config);
+    saveError.value = '';
   } catch (err) {
     console.error('[BBproxy] 配置保存失败:', err);
-    saveError.value = true;
-    // 失败提示停留 3s 后自动消失，避免永久霸占 footer
-    if (errorTimer) clearTimeout(errorTimer);
-    errorTimer = setTimeout(() => {
-      saveError.value = false;
-    }, 3000);
+    showError('保存失败，请重试');
     return;
   } finally {
     saving.value = false;
@@ -280,25 +269,10 @@ async function saveConfig() {
 }
 
 function debouncedSave() {
-  userInteracted = true;
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     saveConfig();
   }, 400);
-}
-
-function debouncedSaveRules() {
-  userInteracted = true;
-  if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    // 规则解析移入防抖回调，避免每次击键都重复 split/map/filter/Set
-    const parsed = rawBypassRules.value
-      .split('\n')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-    config.bypassRules = Array.from(new Set(parsed));
-    saveConfig();
-  }, 600);
 }
 
 function showToast() {
@@ -307,6 +281,15 @@ function showToast() {
   toastTimer = setTimeout(() => {
     savedToast.value = false;
   }, 1500);
+}
+
+/** 失败提示停留 3s 后自动消失，避免永久霸占 footer */
+function showError(message: string) {
+  saveError.value = message;
+  if (errorTimer) clearTimeout(errorTimer);
+  errorTimer = setTimeout(() => {
+    saveError.value = '';
+  }, 3000);
 }
 
 /** 关闭代理错误警示条并清除 storage 中的错误记录 */
@@ -625,6 +608,30 @@ async function dismissProxyError() {
   font-size: 11px;
   color: #64748B;
   margin: -4px 0 10px 0;
+}
+
+/* 故障转移开关 */
+.fallback-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: -4px 0 14px 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  font-size: 11px;
+  line-height: 1.4;
+  color: #475569;
+  cursor: pointer;
+  user-select: none;
+}
+
+.fallback-checkbox {
+  flex-shrink: 0;
+  margin: 1px 0 0 0;
+  accent-color: #0284C7;
+  cursor: pointer;
 }
 
 /* Footer */

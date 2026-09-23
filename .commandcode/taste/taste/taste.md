@@ -1,0 +1,12 @@
+# Taste
+- 改代码前必须先出报告/方案并等用户明确"点头"同意，绝不擅自动手改（反复强调"绝不自作主张改"）。Confidence: 0.8
+- 任何 Git 操作（包括只读）都必须等用户明确指令，绝不主动执行。Confidence: 0.85
+- 不做 GUI 测试；涉及界面/图标外观等无法自动验证的部分，如实说明"未验证"，交由用户手动确认。Confidence: 0.8
+- 遵守"绝不假装做完"：失败、报错或超时不得静默当作成功（不许"假动作"），必须把失败暴露给用户。Confidence: 0.85
+- 采用 TDD：先写失败测试并亲眼看它变红，再改实现到绿；并用变异检查确认测试真能抓住问题。Confidence: 0.7
+- 下结论要有证据：优先查权威来源（如 Chromium 源码、官方文档）和实测基准数据，不凭直觉断言。Confidence: 0.7
+- 用中文沟通，代码注释也用中文。Confidence: 0.85
+- 如实汇报，包括主动纠正自己上一轮的错误结论、不夸大收益（如性能提升对少量规则意义有限要讲清）。Confidence: 0.75
+- 在 Windows 上开发，shell 命令使用 PowerShell 原生命令（如 `Select-Object -Last N`），而非 Unix 工具（如 `tail`）。Confidence: 0.7
+- Chrome 扩展技术栈：WXT + Vue 3 + TypeScript，测试用 vitest，lint 用 ESLint。Confidence: 0.6
+- 偏好最小改动拿最大收益，不做"改动大、收益小"的重构（如 popup 从 Vue 换原生 DOM 不建议做）。Confidence: 0.6

@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { sanitizeProxyConfig } from './storage';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { loadPopupState, sanitizeProxyConfig } from './storage';
 import { DEFAULT_PROXY_CONFIG, MAX_BYPASS_RULES, MAX_HOST_LENGTH, MAX_RULE_LENGTH } from '../types/proxy';
 
 describe('sanitizeProxyConfig', () => {
@@ -75,5 +75,83 @@ describe('sanitizeProxyConfig', () => {
   it('server 缺失时使用默认 server', () => {
     const cfg = sanitizeProxyConfig({ currentMode: 'auto' });
     expect(cfg.server).toEqual(DEFAULT_PROXY_CONFIG.server);
+  });
+
+  it('fallbackDirect 缺失时默认 false（故障转移必须显式开启）', () => {
+    expect(sanitizeProxyConfig({ currentMode: 'auto' }).fallbackDirect).toBe(false);
+    expect(sanitizeProxyConfig(null).fallbackDirect).toBe(false);
+  });
+
+  it('fallbackDirect 仅接受布尔 true', () => {
+    expect(sanitizeProxyConfig({ fallbackDirect: true }).fallbackDirect).toBe(true);
+    expect(sanitizeProxyConfig({ fallbackDirect: false }).fallbackDirect).toBe(false);
+    // 脏数据（字符串 'true'、数字 1、对象）不得被当作开启，否则会静默让流量裸奔
+    expect(sanitizeProxyConfig({ fallbackDirect: 'true' as never }).fallbackDirect).toBe(false);
+    expect(sanitizeProxyConfig({ fallbackDirect: 1 as never }).fallbackDirect).toBe(false);
+  });
+
+  it('host 合法性口径与 sanitizeHost 一致：会被改写的输入直接回退默认', () => {
+    // 旧行为是"原样存下 my proxy，应用时才被静默改成 127.0.0.1"，
+    // 结果面板显示 my proxy、实际代理指向本机，且没有任何提示
+    expect(sanitizeProxyConfig({ server: { host: 'my proxy' } }).server.host).toBe(
+      DEFAULT_PROXY_CONFIG.server.host
+    );
+    expect(sanitizeProxyConfig({ server: { host: 'evil"quote' } }).server.host).toBe(
+      DEFAULT_PROXY_CONFIG.server.host
+    );
+  });
+
+  it('合法 host 原样保留（IPv6 裸写保留，应用时才补方括号）', () => {
+    expect(sanitizeProxyConfig({ server: { host: 'proxy.example.com' } }).server.host).toBe(
+      'proxy.example.com'
+    );
+    expect(sanitizeProxyConfig({ server: { host: '::1' } }).server.host).toBe('::1');
+  });
+});
+
+describe('loadPopupState（面板打开时的单次读取）', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('一次 IPC 同时取出配置与代理错误，且都经清洗', () => {
+    vi.stubGlobal('chrome', {
+      storage: {
+        local: {
+          get: vi.fn(async (keys: string[]) => {
+            // 断言只请求一次、且把两个键一次取回（旧的两次串行读取是多余的往返）
+            expect(keys).toHaveLength(2);
+            return {
+              proxyConfig: { currentMode: 'auto', server: { host: 'proxy.local', port: 1080, scheme: 'http' } },
+              proxyError: { error: '代理不可达' },
+            };
+          }),
+        },
+      },
+    });
+
+    return loadPopupState().then((state) => {
+      expect(state.config.currentMode).toBe('auto');
+      expect(state.config.server.host).toBe('proxy.local');
+      expect(state.error).toBe('代理不可达');
+    });
+  });
+
+  it('storage 为空时回退默认配置，错误为空串', async () => {
+    vi.stubGlobal('chrome', {
+      storage: { local: { get: vi.fn(async () => ({})) } },
+    });
+
+    const state = await loadPopupState();
+    expect(state.config).toEqual(DEFAULT_PROXY_CONFIG);
+    expect(state.error).toBe('');
+  });
+
+  it('错误字段形状不对时不抛异常，只当作没有错误', async () => {
+    vi.stubGlobal('chrome', {
+      storage: { local: { get: vi.fn(async () => ({ proxyError: { error: 42 } })) } },
+    });
+
+    expect((await loadPopupState()).error).toBe('');
   });
 });
